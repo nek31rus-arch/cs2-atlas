@@ -8,3 +8,5 @@
 .sort-button{background:transparent;border:0;padding:0;color:inherit;text-transform:uppercase;letter-spacing:inherit;font-size:inherit;white-space:nowrap}.sort-button:hover{color:var(--accent);background:transparent}.table-wrap>p,.table-wrap>button{margin:10px 12px}th[aria-sort=ascending],th[aria-sort=descending]{color:var(--accent)}
 
 .interface-update{display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap}.interface-update[hidden]{display:none}
+
+.finding .renders>img{display:block;min-width:0;width:100%;max-width:100%;height:auto;object-fit:contain}
