@@ -1,0 +1,2 @@
+User-agent: *
+# Pages contain noindex; crawling is allowed so crawlers can read it.
