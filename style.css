@@ -10,3 +10,7 @@
 .interface-update{display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap}.interface-update[hidden]{display:none}
 
 .finding .renders>img{display:block;min-width:0;width:100%;max-width:100%;height:auto;object-fit:contain}
+
+.offer-modes{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}
+.offer-mode{min-height:44px;padding:8px 12px;text-align:left}
+.offer-mode.active{border-color:var(--accent);color:var(--accent)}

@@ -28,7 +28,7 @@ function fxDescription(r){if(r.currency==='RUB')return 'Исходная цен�
 
 function safeURL(s){try{let u=new URL(s);return ['https:','http:'].includes(u.protocol)?u.href:null;}catch{return null;}}
 function link(text,url){let a=node('a',text);const u=safeURL(url);if(u){a.href=u;a.target='_blank';a.rel='noopener noreferrer';}else return node('span','Нет точной ссылки','muted');return a;}
-function priceCell(r){const cell=node('td',undefined,'price');cell.title=fxDescription(r);let url=r.price_url??r.display_url;if(safeURL(url))cell.append(link(price(r),url));else cell.textContent=price(r);return cell;}
+function priceCell(r){const cell=node('td',undefined,'price');cell.title=fxDescription(r);let url=r.price_url??r.display_url;if(!expiredSnapshotOffer(r)&&safeURL(url))cell.append(link(price(r),url));else cell.textContent=price(r);return cell;}
 function setTab(tab){state.tab=tab;for(let n of ['catalogue','feed','queue','findings'])$(n).hidden=n!==tab;document.querySelectorAll('[data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));$('pageTitle').textContent={catalogue:'Каталог паттернов',feed:'Новые записи',queue:'Приоритетные обновления',findings:'Подробная карточка'}[tab];if(tab==='feed')renderFeed();if(tab==='queue')renderQueue();if(tab==='findings')renderFinding();writeHash();}
 function writeHash(){const p=new URLSearchParams({tab:state.tab,skin:state.skin});if(state.seed!==null)p.set('seed',state.seed);if($('wear').value)p.set('wear',$('wear').value);if($('archive').checked)p.set('archive','1');if($('variant').value!=='normal')p.set('variant',$('variant').value);history.replaceState(null,'','#'+p);}
 function readHash(){let p=new URLSearchParams(location.hash.slice(1));if(p.get('skin')&&p.get('skin').includes(' | ')&&p.get('skin').length<=200)state.skin=p.get('skin');let n=p.get('seed');if(n!==null&&/^\d+$/.test(n)&&+n<=1000)state.seed=+n;else state.seed=null;$('wear').value=['FN','MW','FT','WW','BS','cap:0.0001','cap:0.001','cap:0.01'].includes(p.get('wear'))?p.get('wear'):'';$('archive').checked=p.get('archive')==='1';$('variant').value=['normal','stattrak','souvenir'].includes(p.get('variant'))?p.get('variant'):'normal';$('seedInput').value=state.seed??'';setTab(['catalogue','feed','queue','findings'].includes(p.get('tab'))?p.get('tab'):'catalogue');renderCatalogue();}
@@ -41,7 +41,7 @@ function groupView(g){
  const key=JSON.stringify([g.skin,g.id,$('wear').value,$('variant').value]);
  if(!state.groupViews.has(key)){
   if(state.groupViews.size>=256)state.groupViews.delete(state.groupViews.keys().next().value);
-  state.groupViews.set(key,{key,tab:'ask',disclosures:{},filters:{venue:'',seed:false,clean:false,fresh:false},tables:{ask:{limit:10,key:key+'|ask'},history:{limit:10,key:key+'|history'}}});
+  state.groupViews.set(key,{key,tab:'ask',offerMode:'confirmed',disclosures:{},filters:{venue:'',seed:false,clean:false},tables:{ask:{limit:10,key:key+'|ask'},history:{limit:10,key:key+'|history'}}});
  }
  return state.groupViews.get(key);
 }
@@ -103,6 +103,24 @@ function offerSourceSummary(packet){
   const label=source.state==='receiving'&&(!Number.isFinite(age)||age>120000||age<0)?'нет свежего подтверждения потока':labels[source.state]||'статус неизвестен';
   return name+': '+label;
  }).join('; ')+'. Потоки объявлений частичные.';
+}
+
+function snapshotSummary(packet,now=Date.now()){
+ const stamp=Date.parse(packet.public_snapshot_at);
+ if(!Number.isFinite(stamp)||stamp>now)return 'Время снимка не подтверждено.';
+ const minutes=Math.floor((now-stamp)/60000);
+ const elapsed=minutes<1?'меньше минуты назад':minutes<60?minutes+' мин назад':
+  minutes<1440?Math.floor(minutes/60)+' ч '+minutes%60+' мин назад':Math.floor(minutes/1440)+' дн. назад';
+ const labels={receiving:'принимал данные',receiving_no_selected_candidate:'принимал поток',connecting:'подключался',
+  needs_review:'требовал проверки',capacity_wait:'ждал места в базе',paused_by_owner:'был на паузе',
+  disabled:'был выключен',not_activated:'не был подключён'};
+ const sources=[['Market',packet.market_source],['LIS',packet.lis_source]].map(([name,source])=>{
+  const seen=Date.parse(source?.observed_at);
+  const label=!Number.isFinite(seen)||seen>stamp?'нет подтверждённого статуса':
+   ['receiving','receiving_no_selected_candidate'].includes(source.state)&&stamp-seen>120000?'нет свежей квитанции':labels[source.state]||'статус неизвестен';
+  return name+' — '+label;
+ });
+ return 'Снимок '+date(packet.public_snapshot_at)+' · '+elapsed+'. На момент снимка '+sources.join(', ')+'.';
 }
 
 function suggestions(){const matches=searchNames($('skinSearch').value);state.suggestions=matches.slice(0,40);state.suggestIndex=-1;$('suggestions').replaceChildren();for(const s of state.suggestions){let b=button(title(s),()=>selectSkin(s));b.setAttribute('role','option');b.append(node('small',s+' · '+(D.active[s.toLowerCase()]?'Текущий каталог':'Исследовательский архив')));$('suggestions').append(b);}if(!matches.length)$('suggestions').append(node('div','Не найдено. Попробуй название оружия или раскраски.','search-empty'));$('suggestions').hidden=false;$('skinSearch').setAttribute('aria-expanded','true');}
@@ -178,7 +196,17 @@ function openCompare(){$('compareContent').replaceChildren();for(const x of stat
 function allAsks(){return D.asks.filter(r=>['current','recent_observed_ask'].includes(r.status)&&new Date(r.valid_until)>Date.now());}
 function decimalCompare(a,b){let sa=String(a),sb=String(b);if(!/^\d+(\.\d+)?$/.test(sa)||!/^\d+(\.\d+)?$/.test(sb))return null;let [ai,af='']=sa.split('.'),[bi,bf='']=sb.split('.'),len=Math.max(af.length,bf.length);let av=BigInt(ai+af.padEnd(len,'0')),bv=BigInt(bi+bf.padEnd(len,'0'));return av<bv?-1:av>bv?1:0;}
 function matchesWear(r,value=$('wear').value){if(!value)return true;if(!value.startsWith('cap:'))return r.wear===value;if(r.wear!=='FN'||r.float_text==null)return false;let upper=value.slice(4),lower={'0.0001':'0','0.001':'0.0001','0.01':'0.001'}[upper];if(lower===undefined)return false;let lo=decimalCompare(r.float_text,lower),hi=decimalCompare(r.float_text,upper);if(lo===null||hi===null)return false;if(decimalCompare(r.float_text,'0')===0&&r.float_precision_mode!=='exact')return false;return (lower==='0'?lo>=0:lo>0)&&hi<=0;}
-function filterRows(rows,g,options={}){return rows.filter(r=>(!r.valid_until||new Date(r.valid_until)>Date.now())&&r.skin===g.skin&&g.seeds.includes(Number(r.seed))&&r.variant===$('variant').value&&matchesWear(r)&&(!options.venue||r.venue===options.venue)&&(!options.clean||r.accessory_state==='verified'&&!r.accessory_present)&&(!options.fresh||((Date.now()-new Date(r.observed_at))>=0&&(Date.now()-new Date(r.observed_at))<15*60000))&&(!options.seed||Number(r.seed)===state.seed));}
+function inConfirmation(r,now=Date.now()){
+ const observed=Date.parse(r.observed_at),until=Date.parse(r.valid_until);
+ return Number.isFinite(observed)&&observed<=now&&Number.isFinite(until)&&until>now;
+}
+function expiredSnapshotOffer(r){return r.snapshot_offer===true&&!inConfirmation(r);}
+function groupOffers(packet,mode,now=Date.now()){
+ const current=packet.asks||[],observed=mode==='latest'?[...current,...(packet.best_observed_asks||[])]:current.filter(r=>inConfirmation(r,now));
+ return [...new Map(observed.filter(r=>!r.historical_only&&['recent_observed_ask','older_observed_ask'].includes(r.status))
+  .map(r=>[r.id,{...r,snapshot_offer:true}])).values()];
+}
+function filterRows(rows,g,options={}){return rows.filter(r=>(options.includeExpiredSnapshotOffers&&r.snapshot_offer===true||!r.valid_until||new Date(r.valid_until)>Date.now())&&r.skin===g.skin&&g.seeds.includes(Number(r.seed))&&r.variant===$('variant').value&&matchesWear(r)&&(!options.venue||r.venue===options.venue)&&(!options.clean||r.accessory_state==='verified'&&!r.accessory_present)&&(!options.seed||Number(r.seed)===state.seed));}
 function sortValue(r,key){
  if(key==='price') {if(r.price==null)return null;if(!FX[r.currency])return r.currency+':'+String(r.price).padStart(24,'0');if(r.currency==='RUB')return Number(r.price);const f=FX[r.currency],c=f&&rubCents(r.price,f.rub_per_unit);return c===null||c===undefined?null:Number(c)/100;}
  if(key==='ingestion_sequence')return BigInt(r.ingestion_sequence);
@@ -199,10 +227,14 @@ function rowsTable(input,historyRows=false,max=10,sort=state.tableSort||{key:'ob
   let tr=node('tr'),source=node('td');if(feedMode)source.append(button(feedVenueLabel(r.venue)+' · '+title(r.skin),()=>openFeedPattern(r),'tiny'));else source.textContent=r.venue;
   let timeCell=node('td',date(historyRows?r.sold_at:feedMode?r.known_at:r.observed_at));if(historyRows){timeCell.append(node('div',(r.reported_reference?'Получено источником: ':'Получено: ')+date(r.observed_at),'muted'));if(r.reported_reference){timeCell.append(node('div','Добавлено в Atlas: '+date(r.imported_at),'muted'));if(r.admitted_at)timeCell.append(node('div','Допущено к расчёту: '+date(r.admitted_at),'muted'));if(r.reported_raw_date!=null)timeCell.append(node('div','Дата в источнике: '+String(r.reported_raw_date),'muted'));}}if(feedMode)timeCell.append(node('div',(r.kind==='ask'?'Замечено: ':'Продано: ')+date(r.observed_at),'muted'));tr.append(source,timeCell);let seed=node('td');if(r.seed===null||r.seed===undefined)seed.textContent='Не указан';else seed.append(button('#'+r.seed,()=>feedMode?openFeedPattern(r):selectSeed(r.seed,r.skin),'seed-button'+(state.seed===Number(r.seed)?' selected':'')));
   const floatCell=node('td',(r.float_display??r.float_text??'Не указан')+' · '+r.wear,'float');floatCell.title=r.float_text??'';tr.append(seed,floatCell,priceCell(r));
-  let st=node('td');st.append(node('span',r.status==='reported_material_conflict_review'?'Конфликт с прямыми данными CSFloat · вне расчёта':r.status==='unverified_history_reference'?'Запись SkinFlow · продажа не подтверждена':r.reported_reference?(r.qualified_for_pricing?'SkinFlow сообщает о продаже · допущена к расчёту':'SkinFlow сообщает о продаже · справочно'):historyRows||feedMode&&r.kind==='sale'?'Источник сообщает о продаже':age(r.observed_at),historyRows||feedMode&&r.kind==='sale'?'muted':((Date.now()-new Date(r.observed_at))<900000?'fresh':'old')));
+  let st=node('td');if(!r.snapshot_offer||historyRows)st.append(node('span',r.status==='reported_material_conflict_review'?'Конфликт с прямыми данными CSFloat · вне расчёта':r.status==='unverified_history_reference'?'Запись SkinFlow · продажа не подтверждена':r.reported_reference?(r.qualified_for_pricing?'SkinFlow сообщает о продаже · допущена к расчёту':'SkinFlow сообщает о продаже · справочно'):historyRows||feedMode&&r.kind==='sale'?'Источник сообщает о продаже':age(r.observed_at),historyRows||feedMode&&r.kind==='sale'?'muted':((Date.now()-new Date(r.observed_at))<900000?'fresh':'old')));
   if(r.reported_reference&&r.sale_type)st.append(node('div',r.sale_type==='auction'?'Аукцион · вне расчёта':(r.qualified_for_pricing?'Продажа по фиксированной цене · история расчёта':'Продажа по фиксированной цене · справочно'),'muted'));if(r.reported_reference&&!r.qualified_for_pricing)st.append(node('div','Не включено в расчёт количества продаж','muted'));if(r.accessory_state==='unknown')st.append(node('div','Аксессуары: нет точных данных','muted'));else if(r.accessory_present)st.append(node('div',r.reported_reference?'Источник сообщает об аксессуарах':'Аксессуары · учитывать как конкурента','muted'));
-  if(!historyRows&&r.snapshot_offer)st.append(node('div','Объявление из снимка · '+(new Date(r.valid_until)>Date.now()?'ещё в исходном сроке подтверждения':'срок подтверждения истёк')+' · наличие сейчас не проверено','old'));if(!historyRows&&r.status==='owner_bought')st.append(node('div','Выкуплен владельцем · архив','old'));if(!historyRows&&['removed','missing','inactive','disappeared'].includes(r.status))st.append(node('div','Лот недоступен по последней записи','old'));
-  if(!historyRows)st.append(node('div',r.origin==='manual'?'Ручное наблюдение':r.origin==='live_core'?'Новая запись базы':r.origin==='reference_api_snapshot'?'Справочник CSFloat':'Срез базы','muted'));tr.append(st);let a=node('td');let label=r.reported_reference?'Запись источника SkinFlow':r.price_link_kind==='atlas_pattern_history'?'История паттерна в Atlas':historyRows?(r.display_link_kind==='item_history'?'Страница лота':'Источник продажи'):r.display_link_kind==='exact_lot'?'Открыть лот':r.display_link_kind==='filtered_lots'?'Найти по фильтрам':r.display_link_kind==='item_page'?'Открыть этот скин':'Ссылка недоступна';let target=link(label,r.price_url??r.display_url);if(r.display_link_kind==='filtered_lots')target.title='Фильтр для поиска экземпляра; сверь seed, float и ID с этой строкой';a.append(target);if(!historyRows&&r.external_id)a.append(node('div','ID '+r.external_id,'muted'));if(historyRows&&r.reported_reference&&r.external_id)a.append(node('div','Заявленный ID CSFloat: '+r.external_id,'muted'));tr.append(a);body.append(tr);
+  if(!historyRows&&r.snapshot_offer){
+   const until=Date.parse(r.valid_until),confirmed=inConfirmation(r);
+   st.append(node('div',!Number.isFinite(until)?'Срок подтверждения неизвестен':confirmed?'Подтверждение до '+date(r.valid_until):'Подтверждение истекло '+date(r.valid_until),'old'));
+   st.append(node('div','Наличие сейчас не проверено','muted'));
+  }if(!historyRows&&r.status==='owner_bought')st.append(node('div','Выкуплен владельцем · архив','old'));if(!historyRows&&['removed','missing','inactive','disappeared'].includes(r.status))st.append(node('div','Лот недоступен по последней записи','old'));
+  if(!historyRows)st.append(node('div',r.origin==='manual'?'Ручное наблюдение':r.origin==='live_core'?'Новая запись базы':r.origin==='reference_api_snapshot'?'Справочник CSFloat':'Срез базы','muted'));tr.append(st);let a=node('td');let label=r.reported_reference?'Запись источника SkinFlow':r.price_link_kind==='atlas_pattern_history'?'История паттерна в Atlas':historyRows?(r.display_link_kind==='item_history'?'Страница лота':'Источник продажи'):r.display_link_kind==='exact_lot'?'Открыть лот':r.display_link_kind==='filtered_lots'?'Найти по фильтрам':r.display_link_kind==='item_page'?'Открыть этот скин':'Ссылка недоступна';let target=expiredSnapshotOffer(r)?node('span','Сохранённое наблюдение','muted'):link(label,r.price_url??r.display_url);if(r.display_link_kind==='filtered_lots'&&!expiredSnapshotOffer(r))target.title='Фильтр для поиска экземпляра; сверь seed, float и ID с этой строкой';a.append(target);if(!historyRows&&r.external_id)a.append(node('div','ID '+r.external_id,'muted'));if(historyRows&&r.reported_reference&&r.external_id)a.append(node('div','Заявленный ID CSFloat: '+r.external_id,'muted'));tr.append(a);body.append(tr);
  }t.append(body);wrap.append(t);if(rows.length>max){wrap.append(node('p','Показано '+max+' из '+rows.length+'. Сортировка учитывает все '+rows.length+' строк.','muted'),button('Показать ещё 50',()=>{if(tableView)tableView.limit=max+50;wrap.replaceWith(rowsTable(input,historyRows,max+50,sort,feedMode,tableView));}));}return wrap;
 }
 
@@ -264,6 +296,13 @@ function renderGroup(g){
  box.append(det);
  const type=view.tab;
  let tabs=node('div',undefined,'price-tabs'),area=node('div');
+ const refresh=()=>{if(!area.isConnected){view.offerExpiry=null;return;}const active=document.activeElement,inside=area.contains(active),focus=inside?active.closest('[data-atlas-focus]')?.dataset.atlasFocus:null;
+  const left=area.querySelector('.table-wrap')?.scrollLeft??0;
+  const viewport=catalogueViewport();update();
+  const table=area.querySelector('.table-wrap');if(table)table.scrollLeft=left;
+  if(inside&&(!focus||!area.querySelector('[data-atlas-focus="'+CSS.escape(focus)+'"]')))modes.querySelector('[aria-pressed="true"]')?.focus({preventScroll:true});
+  restoreCatalogueViewport(viewport);
+ };
  for(const [value,label]of[['ask','Предложения'],['history','История продаж']]){
   tabs.append(groupControl(button(label,()=>{view.tab=value;renderCatalogue();},value===type?'active':''),view,'tab:'+value));
  }
@@ -274,20 +313,34 @@ function renderGroup(g){
  let only=groupControl(node('input'),view,'only');only.type='checkbox';only.disabled=state.seed===null;
  let label=node('label','Только выбранный номер ');label.append(only);
  let clean=groupControl(node('input'),view,'clean');clean.type='checkbox';let cl=node('label','Без аксессуаров ');cl.append(clean);
- let fresh=groupControl(node('input'),view,'fresh');fresh.type='checkbox';let fl=node('label','Не старше 15 минут ');fl.append(fresh);
- filters.append(venue,label,cl);if(type==='ask')filters.append(fl);
- venue.value=view.filters.venue;only.checked=view.filters.seed&&state.seed!==null;clean.checked=view.filters.clean;fresh.checked=view.filters.fresh;
+ filters.append(venue,label,cl);
+ venue.value=view.filters.venue;only.checked=view.filters.seed&&state.seed!==null;clean.checked=view.filters.clean;
+ const modes=node('div',undefined,'offer-modes');modes.setAttribute('role','group');modes.setAttribute('aria-label','Срок подтверждения предложений');
+ if(type==='ask')for(const [value,caption] of [['confirmed','В сроке подтверждения'],['latest','Последние наблюдения']]){
+  const control=groupControl(button(caption,()=>{const viewport=catalogueViewport();view.offerMode=value;update();restoreCatalogueViewport(viewport);},'offer-mode'),view,'offers:'+value);
+  control.dataset.offerMode=value;modes.append(control);
+ }
  const update=()=>{
-  view.filters={venue:venue.value,seed:state.seed!==null&&only.checked,clean:clean.checked,fresh:fresh.checked};
-  const options={...view.filters,fresh:type==='ask'&&view.filters.fresh};
+  view.filters={venue:venue.value,seed:state.seed!==null&&only.checked,clean:clean.checked};
+  for(const control of modes.children){const active=control.dataset.offerMode===view.offerMode;control.classList.toggle('active',active);control.setAttribute('aria-pressed',String(active));}
   const packet=view.dataScope===groupDataQuery(g).toString()?view.packet:null;if(!packet){area.replaceChildren(node('div',view.dataError||'Загружается история всей группы…','muted'));return;}
-  const input=type==='history'?packet.sales:packet.asks.filter(r=>r.status==='recent_observed_ask'&&new Date(r.valid_until)>Date.now());
-  let rows=filterRows(input,g,options);rows.sort((a,b)=>(b.sold_at||b.observed_at).localeCompare(a.sold_at||a.observed_at));
+  const input=type==='history'?packet.sales:groupOffers(packet,view.offerMode);
+  const rows=filterRows(input,g,{...view.filters,includeExpiredSnapshotOffers:type==='ask'&&view.offerMode==='latest'});
+  rows.sort((a,b)=>(b.sold_at||b.observed_at).localeCompare(a.sold_at||a.observed_at));
+  if(type==='ask'){
+   const now=Date.now(),at=Math.min(Infinity,...rows.filter(r=>inConfirmation(r,now)).map(r=>Date.parse(r.valid_until)));
+   view.offerExpiry=at===Infinity?null:{refresh,at};
+  }
+  if(type==='ask'&&view.offerMode==='confirmed'&&!rows.length){
+   area.replaceChildren(node('div','В этом снимке нет предложений в сроке подтверждения для выбранных условий.','empty'));return;
+  }
   area.replaceChildren(rowsTable(rows,type==='history',10,undefined,false,view.tables[type]));
   if(type==='history'){area.append(node('p','История группы: загружено '+packet.sales.length+' из '+packet.display_sales+' записей в выбранном окне. Фильтры действуют на загруженные страницы.','muted'));if(packet.next_offset!==null){const more=button(view.dataPending?'Загружается…':'Загрузить ещё до 100 продаж группы',()=>loadGroupData(g,view,true));more.disabled=!!view.dataPending;area.append(more);}}
   if(view.dataError)area.append(node('p',view.dataError,'muted'));
  };
- for(const element of[venue,only,clean,fresh])element.onchange=update;
+ for(const element of[venue,only,clean])element.onchange=update;
+ if(type!=='ask')view.offerExpiry=null;
+ if(type==='ask')quotes.append(modes);
  quotes.append(filters,area);box.append(quotes);update();
  if(type==='history')quotes.append(node('p','¹ Время продажи источника показано отдельно от времени приёма. Расчёт продавцу не проверен. Исходная валюта сохранена; неподтверждённый курс не применяется.','muted'));
  let actions=node('div',undefined,'actions');
@@ -410,7 +463,10 @@ async function pollOnce(){if(pollPending||document.hidden)return;pollPending=tru
 
   if(state.catalogueRevision!==j.revision){state.catalogueRevision=j.revision;state.catalogueKey=null;state.catalogueError=null;loadSavedCatalogue();}
   for(const v of feedStore.enabled)if(![...$('feedVenue').options].some(o=>o.value===v))$('feedVenue').append(new Option(feedVenueLabel(v),v));
-  $('connection').textContent='● Опубликованный снимок';$('connection').classList.add('online');const phase=j.history?.catalogue_phase;const windows=phase&&Array.isArray(phase.scope_ids)?' Принято окон: '+(phase.completed_scopes||0)+'/'+phase.scope_ids.length+'.':'';$('connectionNote').textContent='Снимок данных: '+date(j.public_snapshot_at)+'. Полная сохранённая история выбранных скинов доступна с перелистыванием; полнота рынка и глубина 3/5 месяцев не подтверждены. Объявления проверяются по сроку исходного подтверждения; наличие сейчас не гарантировано. Следующая публикация — по работе приложения, плановый интервал 30 минут. При выключенном Mac снимок не обновляется.';
+  $('connection').textContent='Опубликованный снимок';$('connection').classList.remove('online');$('connectionNote').textContent=snapshotSummary(j);
+  if(state.tab==='catalogue')for(const view of state.groupViews.values()){
+   if(view.offerExpiry?.at<=Date.now())view.offerExpiry.refresh();
+  }
  }catch{state.connected=false;$('connection').textContent='База V2 недоступна';$('connection').classList.remove('online');$('connectionNote').textContent='Свежий ответ V2 не получен. Показанные прежние записи могут быть устаревшими; старый архив не подмешивается.';}
  finally{pollPending=false;renderFeed();checkClientRelease();}
 }
