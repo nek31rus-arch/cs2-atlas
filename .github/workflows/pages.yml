@@ -4,6 +4,7 @@ on:
     branches: [main]
 permissions:
   contents: read
+  actions: read
   pages: write
   id-token: write
 concurrency:
@@ -22,8 +23,71 @@ jobs:
           persist-credentials: false
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v4
+        id: pages_artifact
         with:
           path: '.'
           retention-days: 1
+          name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Confirm Pages artifact is visible
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PAGES_ARTIFACT_ID: ${{ steps.pages_artifact.outputs.artifact_id }}
+          PAGES_ARTIFACT_NAME: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          python3 - <<'PYTHON'
+          import json
+          import os
+          import time
+          from urllib.error import HTTPError, URLError
+          from urllib.parse import urlencode
+          from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+          class NoRedirect(HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+
+          artifact_id = os.environ["PAGES_ARTIFACT_ID"]
+          artifact_name = os.environ["PAGES_ARTIFACT_NAME"]
+          if not artifact_id.isascii() or not artifact_id.isdecimal():
+              raise SystemExit("Pages upload did not return a valid artifact ID")
+          repo = os.environ["GITHUB_REPOSITORY"]
+          run = os.environ["GITHUB_RUN_ID"]
+          query = urlencode({"name": artifact_name, "per_page": 2})
+          url = f'{os.environ["GITHUB_API_URL"]}/repos/{repo}/actions/runs/{run}/artifacts?{query}'
+          request = Request(url, headers={
+              "Accept": "application/vnd.github+json",
+              "Authorization": f'Bearer {os.environ["GH_TOKEN"]}',
+          })
+          opener = build_opener(NoRedirect())
+          for check in range(6):
+              try:
+                  with opener.open(request, timeout=4) as resp:
+                      if resp.status != 200 or resp.headers.get("Retry-After") is not None:
+                          raise SystemExit("Pages artifact lookup is held by HTTP status or Retry-After")
+                      raw = resp.read(65537)
+                      if len(raw) > 65536:
+                          raise SystemExit("Pages artifact lookup exceeded its response bound")
+                      data = json.loads(raw)
+              except HTTPError as error:
+                  raise SystemExit(f"Pages artifact lookup stopped on HTTP {error.code}") from None
+              except (URLError, TimeoutError):
+                  raise SystemExit("Pages artifact lookup timed out or lost its connection") from None
+
+              if data["total_count"] == 1 and len(data["artifacts"]) == 1:
+                  artifact = data["artifacts"][0]
+                  if (str(artifact["id"]) == artifact_id and artifact["name"] == artifact_name
+                          and artifact["expired"] is False and artifact["size_in_bytes"] > 0):
+                      print(f"Pages artifact {artifact_id} is visible")
+                      break
+              if data["total_count"] != 0 or data["artifacts"]:
+                  raise SystemExit("Pages artifact identity differs from this upload")
+              if check < 5:
+                  time.sleep(3)
+          else:
+              raise SystemExit("Pages artifact is still absent after six read-only checks")
+          PYTHON
       - uses: actions/deploy-pages@v4
         id: deployment
+        with:
+          artifact_name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
